@@ -1,0 +1,30 @@
+name: Daily NSE Bullish Scanner
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "30 11 * * 1-5"
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install packages
+        run: |
+          pip install pandas requests yfinance
+
+      - name: Run scanner
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+        run: |
+          python scanner.py
