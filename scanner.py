@@ -9,15 +9,23 @@ import yfinance as yf
 # =========================
 
 SUPPORT_LOOKBACK = 50
-SUPPORT_DISTANCE = 0.03       # 3%
+SUPPORT_DISTANCE = 0.03       # Support ke aas-paas ±3%
 BATCH_SIZE = 40
 PERIOD = "3mo"
+
+ENTRY_BUFFER = 0.005          # Day-2 High + 0.5%
+
+# Day-2 strength
+MIN_BODY_RATIO = 0.50         # Candle range ka minimum 50% body
+MIN_CLOSE_POSITION = 0.65     # Close range ke upper 35% me
+MIN_BODY_VS_DAY1 = 1.00       # Day-2 body >= Day-1 body
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 
-# NSE official equity securities list
-NSE_LIST_URL = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
+NSE_LIST_URL = (
+    "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
+)
 
 
 # =========================
@@ -38,8 +46,14 @@ def send_telegram(message):
     }
 
     try:
-        response = requests.post(url, data=data, timeout=20)
+        response = requests.post(
+            url,
+            data=data,
+            timeout=20
+        )
+
         print("Telegram:", response.status_code)
+
     except Exception as e:
         print("Telegram error:", e)
 
@@ -65,17 +79,23 @@ def get_nse_stocks():
 
     from io import StringIO
 
-    df = pd.read_csv(StringIO(response.text))
+    df = pd.read_csv(
+        StringIO(response.text)
+    )
 
-    # Only normal equity series
     if " SERIES" in df.columns:
-        df = df[df[" SERIES"].astype(str).str.strip() == "EQ"]
-        symbol_col = "SYMBOL"
+
+        df = df[
+            df[" SERIES"].astype(str).str.strip() == "EQ"
+        ]
+
     elif "SERIES" in df.columns:
-        df = df[df["SERIES"].astype(str).str.strip() == "EQ"]
-        symbol_col = "SYMBOL"
-    else:
-        symbol_col = "SYMBOL"
+
+        df = df[
+            df["SERIES"].astype(str).str.strip() == "EQ"
+        ]
+
+    symbol_col = "SYMBOL"
 
     symbols = (
         df[symbol_col]
@@ -90,7 +110,7 @@ def get_nse_stocks():
 
 
 # =========================
-# CANDLE PATTERNS
+# CANDLE PATTERN
 # =========================
 
 def candle_pattern(df, i):
@@ -120,7 +140,10 @@ def candle_pattern(df, i):
     green = c > o
     previous_red = pc < po
 
-    # 1. Hammer
+    # =========================
+    # HAMMER
+    # =========================
+
     hammer = (
         lower_wick >= body * 2
         and upper_wick <= max(body, candle_range * 0.10)
@@ -130,7 +153,10 @@ def candle_pattern(df, i):
     if hammer:
         return "Hammer"
 
-    # 2. Inverted Hammer
+    # =========================
+    # INVERTED HAMMER
+    # =========================
+
     inverted_hammer = (
         upper_wick >= body * 2
         and lower_wick <= max(body, candle_range * 0.10)
@@ -140,7 +166,10 @@ def candle_pattern(df, i):
     if inverted_hammer:
         return "Inverted Hammer"
 
-    # 3. Bullish Engulfing
+    # =========================
+    # BULLISH ENGULFING
+    # =========================
+
     bullish_engulfing = (
         previous_red
         and green
@@ -152,7 +181,10 @@ def candle_pattern(df, i):
     if bullish_engulfing:
         return "Bullish Engulfing"
 
-    # 4. Piercing Pattern
+    # =========================
+    # PIERCING
+    # =========================
+
     piercing = (
         previous_red
         and green
@@ -163,7 +195,10 @@ def candle_pattern(df, i):
     if piercing:
         return "Piercing Pattern"
 
-    # 5. Bullish Harami
+    # =========================
+    # BULLISH HARAMI
+    # =========================
+
     bullish_harami = (
         previous_red
         and green
@@ -175,17 +210,131 @@ def candle_pattern(df, i):
     if bullish_harami:
         return "Bullish Harami"
 
-    # 6. Dragonfly Doji
-    dragonfly_doji = (
-        body <= candle_range * 0.15
-        and lower_wick >= candle_range * 0.60
-        and upper_wick <= candle_range * 0.15
-    )
-
-    if dragonfly_doji:
-        return "Dragonfly Doji"
+    # IMPORTANT:
+    # Doji ko setup candle nahi banana
+    # =========================
 
     return None
+
+
+# =========================
+# DOWN TREND CHECK
+# =========================
+
+def is_downtrend(df, i):
+
+    if i < 50:
+        return False
+
+    close = df["Close"]
+
+    sma20 = close.iloc[i - 19:i + 1].mean()
+    sma50 = close.iloc[i - 49:i + 1].mean()
+
+    current_close = float(close.iloc[i])
+
+    # Slight downtrend:
+    # 20 DMA below 50 DMA
+    # aur price 20 DMA ke neeche
+    downtrend = (
+        sma20 < sma50
+        and current_close < sma20
+    )
+
+    return downtrend
+
+
+# =========================
+# SUPPORT CHECK
+# =========================
+
+def support_condition(df, prev):
+
+    if prev < SUPPORT_LOOKBACK:
+        return False, None
+
+    # Day-1 se pehle ke 50 candles ka support
+    support = float(
+        df["Low"].iloc[
+            prev - SUPPORT_LOOKBACK:prev
+        ].min()
+    )
+
+    day1_low = float(
+        df["Low"].iloc[prev]
+    )
+
+    day1_close = float(
+        df["Close"].iloc[prev]
+    )
+
+    # Support ke paas / thoda neeche
+    support_upper = support * (1 + SUPPORT_DISTANCE)
+    support_lower = support * (1 - SUPPORT_DISTANCE)
+
+    near_support = (
+        support_lower <= day1_low <= support_upper
+        or
+        support_lower <= day1_close <= support_upper
+    )
+
+    return near_support, support
+
+
+# =========================
+# STRONG DAY-2 CHECK
+# =========================
+
+def strong_day2(
+    day1_open,
+    day1_close,
+    day2_open,
+    day2_high,
+    day2_low,
+    day2_close
+):
+
+    day1_body = abs(
+        day1_close - day1_open
+    )
+
+    day2_body = abs(
+        day2_close - day2_open
+    )
+
+    day2_range = (
+        day2_high - day2_low
+    )
+
+    if day2_range <= 0:
+        return False
+
+    # Green compulsory
+    if day2_close <= day2_open:
+        return False
+
+    # Day-2 body minimum 50% of candle range
+    body_ratio = (
+        day2_body / day2_range
+    )
+
+    if body_ratio < MIN_BODY_RATIO:
+        return False
+
+    # Close upper part of candle
+    close_position = (
+        (day2_close - day2_low)
+        / day2_range
+    )
+
+    if close_position < MIN_CLOSE_POSITION:
+        return False
+
+    # Day-2 body Day-1 se weak nahi honi chahiye
+    if day2_body < day1_body * MIN_BODY_VS_DAY1:
+        return False
+
+    return True
 
 
 # =========================
@@ -210,68 +359,147 @@ def check_stock(symbol):
         if df is None or df.empty:
             return None
 
-        # Handle yfinance multi-index columns
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
+        # Multi-index handle
+        if isinstance(
+            df.columns,
+            pd.MultiIndex
+        ):
+            df.columns = (
+                df.columns
+                .get_level_values(0)
+            )
 
-        required = ["Open", "High", "Low", "Close"]
+        required = [
+            "Open",
+            "High",
+            "Low",
+            "Close"
+        ]
 
         for col in required:
             if col not in df.columns:
                 return None
 
-        df = df.dropna(subset=required)
+        df = df.dropna(
+            subset=required
+        )
 
-        if len(df) < SUPPORT_LOOKBACK + 2:
+        if len(df) < 60:
             return None
 
-        # Current candle = Day 2
-        i = len(df) - 1
+        # =========================
+        # DAY-2 = CURRENT CLOSED DAY
+        # DAY-1 = PREVIOUS DAY
+        # =========================
 
-        # Previous candle = Day 1
+        i = len(df) - 1
         prev = i - 1
 
-        # Day 1 reversal candle
-        pattern = candle_pattern(df, prev)
+        # =========================
+        # DAY-1 VALUES
+        # =========================
+
+        day1_open = float(
+            df["Open"].iloc[prev]
+        )
+
+        day1_high = float(
+            df["High"].iloc[prev]
+        )
+
+        day1_low = float(
+            df["Low"].iloc[prev]
+        )
+
+        day1_close = float(
+            df["Close"].iloc[prev]
+        )
+
+        # =========================
+        # DAY-1 BULLISH REVERSAL
+        # =========================
+
+        pattern = candle_pattern(
+            df,
+            prev
+        )
 
         if pattern is None:
             return None
 
-        # Day 1 support
-        support = float(
-            df["Low"].iloc[prev - SUPPORT_LOOKBACK + 1:prev + 1].min()
+        # =========================
+        # SUPPORT OR DOWNTREND
+        # =========================
+
+        near_support, support = (
+            support_condition(
+                df,
+                prev
+            )
         )
 
-        day1_close = float(df["Close"].iloc[prev])
+        downtrend = is_downtrend(
+            df,
+            prev
+        )
 
-        near_support = day1_close <= support * (1 + SUPPORT_DISTANCE)
-
-        if not near_support:
+        # Dono me se koi ek compulsory
+        if not near_support and not downtrend:
             return None
 
-        # Day 2 values
-        day2_open = float(df["Open"].iloc[i])
-        day2_high = float(df["High"].iloc[i])
-        day2_low = float(df["Low"].iloc[i])
-        day2_close = float(df["Close"].iloc[i])
+        # =========================
+        # DAY-2
+        # =========================
 
-        # Day 2 MUST be green
-        if day2_close <= day2_open:
+        day2_open = float(
+            df["Open"].iloc[i]
+        )
+
+        day2_high = float(
+            df["High"].iloc[i]
+        )
+
+        day2_low = float(
+            df["Low"].iloc[i]
+        )
+
+        day2_close = float(
+            df["Close"].iloc[i]
+        )
+
+        # =========================
+        # DAY-2 STRONG
+        # =========================
+
+        if not strong_day2(
+            day1_open,
+            day1_close,
+            day2_open,
+            day2_high,
+            day2_low,
+            day2_close
+        ):
             return None
 
-        # Day 2 MUST close above Day 1 reversal candle high
-        day1_high = float(df["High"].iloc[prev])
+        # =========================
+        # DAY-2 CLOSE MUST BE
+        # ABOVE DAY-1 HIGH
+        # =========================
 
         if day2_close <= day1_high:
             return None
 
         # =========================
-        # BP / SL / TARGETS
+        # ENTRY = DAY-2 HIGH + 0.5%
         # =========================
 
-        bp = day2_close
+        bp = day2_high * (
+            1 + ENTRY_BUFFER
+        )
 
-        day1_low = float(df["Low"].iloc[prev])
+        # =========================
+        # STOP LOSS
+        # =========================
 
         sl = day1_low
 
@@ -280,39 +508,70 @@ def check_stock(symbol):
         if risk <= 0:
             return None
 
-        tp1 = bp + (risk * 2)
-        tp2 = bp + (risk * 3)
+        # =========================
+        # TARGETS
+        # =========================
 
-        rr1 = 2
-        rr2 = 3
+        tp1 = bp + (
+            risk * 2
+        )
+
+        tp2 = bp + (
+            risk * 3
+        )
+
+        # =========================
+        # TREND / SUPPORT TYPE
+        # =========================
+
+        if near_support and downtrend:
+            zone = "Support + Downtrend"
+
+        elif near_support:
+            zone = "Support Zone"
+
+        else:
+            zone = "Downtrend"
 
         date = df.index[i]
 
         # =========================
-        # MESSAGE
+        # TELEGRAM MESSAGE
         # =========================
 
         message = (
             "🚨 BULLISH SETUP FOUND\n\n"
+
             f"📊 Stock: {symbol}\n"
             f"⏱ Timeframe: 1D\n"
-            f"📅 Confirmation: {date.strftime('%d-%m-%Y')}\n\n"
-            f"🕯 Pattern: {pattern}\n"
+            f"📅 Confirmation: "
+            f"{date.strftime('%d-%m-%Y')}\n\n"
+
+            f"🕯 Day-1 Pattern: {pattern}\n"
+            f"📍 Zone: {zone}\n"
             f"📍 Support: ₹{support:.2f}\n\n"
-            f"🟢 BP / BUY: ₹{bp:.2f}\n"
-            f"🛑 SL: ₹{sl:.2f}\n"
-            f"🎯 TP1: ₹{tp1:.2f}  (1:2)\n"
-            f"🎯 TP2: ₹{tp2:.2f}  (1:3)\n\n"
-            f"💰 Risk: ₹{risk:.2f}\n"
+
             f"📈 Day-1 High: ₹{day1_high:.2f}\n"
-            f"✅ Day-2 Close: ₹{day2_close:.2f}"
+            f"📈 Day-2 High: ₹{day2_high:.2f}\n"
+            f"✅ Day-2 Close: ₹{day2_close:.2f}\n\n"
+
+            f"🟢 ENTRY / BUY: ₹{bp:.2f}\n"
+            f"🛑 SL: ₹{sl:.2f}\n"
+            f"🎯 TP1: ₹{tp1:.2f} (1:2)\n"
+            f"🎯 TP2: ₹{tp2:.2f} (1:3)\n\n"
+
+            f"💰 Risk: ₹{risk:.2f}\n"
+            f"💪 Day-2: STRONG GREEN\n"
+            f"✅ Close > Day-1 High"
         )
 
         return message
 
     except Exception as e:
 
-        print(f"{symbol}: error -> {e}")
+        print(
+            f"{symbol}: error -> {e}"
+        )
 
         return None
 
@@ -323,45 +582,75 @@ def check_stock(symbol):
 
 def main():
 
-    print("Starting NSE Bullish Scanner...")
+    print(
+        "Starting NSE Bullish Scanner..."
+    )
 
     symbols = get_nse_stocks()
 
-    print(f"Total NSE equity symbols: {len(symbols)}")
+    print(
+        f"Total NSE EQ stocks: "
+        f"{len(symbols)}"
+    )
 
     signals = []
 
-    for start in range(0, len(symbols), BATCH_SIZE):
+    # IMPORTANT:
+    # No maximum signal limit
+    # Jitne match honge sab send honge
 
-        batch = symbols[start:start + BATCH_SIZE]
+    for start in range(
+        0,
+        len(symbols),
+        BATCH_SIZE
+    ):
+
+        batch = symbols[
+            start:start + BATCH_SIZE
+        ]
 
         print(
-            f"Scanning {start + 1} - "
+            f"Scanning "
+            f"{start + 1} - "
             f"{min(start + BATCH_SIZE, len(symbols))}"
         )
 
         for symbol in batch:
 
-            result = check_stock(symbol)
+            result = check_stock(
+                symbol
+            )
 
             if result:
 
-                print("\nSIGNAL FOUND:")
+                print(
+                    "\nSIGNAL FOUND:"
+                )
+
                 print(result)
 
-                signals.append(result)
+                signals.append(
+                    result
+                )
 
-                send_telegram(result)
+                send_telegram(
+                    result
+                )
 
             time.sleep(0.15)
 
-        # Small pause between batches
+        # Small pause
         time.sleep(2)
 
-    # No setup message
+    # =========================
+    # NO SIGNAL
+    # =========================
+
     if not signals:
 
-        print("No bullish setup found today.")
+        print(
+            "No bullish setup found."
+        )
 
         send_telegram(
             "📊 NSE Bullish Scanner\n\n"
@@ -369,7 +658,16 @@ def main():
             "No stock matched all conditions."
         )
 
-    print("\nScanner finished.")
+    else:
+
+        print(
+            f"\nTotal signals found: "
+            f"{len(signals)}"
+        )
+
+    print(
+        "\nScanner finished."
+    )
 
 
 if __name__ == "__main__":
